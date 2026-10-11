@@ -1,0 +1,10 @@
+.build/
+.swiftpm/
+.DS_Store
+dist/
+*.xcodeproj
+target/
+
+# 厂商签名安装包，不入库（见 docs/PROTOCOL.md 的下载方式）
+Inphic_signed.pkg
+*.pkg

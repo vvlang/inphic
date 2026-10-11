@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag，例如 v0.1.0（留空则用 VERSION 文件的值）"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 DMG
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本
+        id: ver
+        run: |
+          set -euo pipefail
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v${FILE_VERSION}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "构建 $TAG（VERSION 文件：$FILE_VERSION）"
+
+      # 仓库在同步盘上时 .build 会带 AppleDouble 文件导致 codesign 失败，
+      # 这里显式把 scratch 放到 runner 本地盘。
+      - name: 缓存 Rust 依赖
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/**/Cargo.toml') }}
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust 协议层测试
+        working-directory: rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Swift 测试
+        env:
+          INPHIC_SCRATCH: /tmp/inphic-build
+        run: swift test --scratch-path /tmp/inphic-build
+
+      - name: 构建 .app
+        env:
+          INPHIC_SCRATCH: /tmp/inphic-build
+          INPHIC_DIST: /tmp/inphic-dist
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./Scripts/build-app.sh release
+
+      - name: 打包 DMG
+        env:
+          INPHIC_DIST: /tmp/inphic-dist
+        run: ./Scripts/make-dmg.sh /tmp/inphic-dist/InphicHub.app
+
+      # 没有 Developer ID 证书时用 ad-hoc 签名。
+      # 用户首次打开需要右键 → 打开，或 `xattr -dr com.apple.quarantine`。
+      - name: 上传构件
+        uses: actions/upload-artifact@v4
+        with:
+          name: InphicHub-${{ steps.ver.outputs.version }}-macOS
+          path: |
+            /tmp/inphic-dist/*.dmg
+            /tmp/inphic-dist/InphicHub.app
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /tmp/inphic-dist/*.dmg
+          name: Inphic Hub ${{ steps.ver.outputs.version }}
+          body: |
+            ## Inphic Hub ${{ steps.ver.outputs.version }}
+
+            英菲克（INPHIC）鼠标的 macOS 设置程序。非官方工具。
+
+            ### 安装
+            1. 下载 `.dmg`
+            2. 拖进「应用程序」
+            3. 首次打开需右键 → 打开（未做公证和开发者签名）
+
+            ### 已知限制
+            - 固件不支持读回设置：能读电量，读不回 DPI / 灯光 / 按键
+            - 鼠标进深睡后会丢弃写入，本工具会自动重发唤醒
+            - 蓝牙通道尚未实机验证
+
+            协议细节见仓库内 `docs/PROTOCOL.md`。
+          draft: false
+          prerelease: false

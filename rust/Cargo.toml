@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+# 目前只做协议层。它与运行时无关，是一份「可执行的协议规范」：
+# App 用 Swift，但字节布局与黄金向量由这里的测试钉死。
+members = ["crates/inphic-protocol"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

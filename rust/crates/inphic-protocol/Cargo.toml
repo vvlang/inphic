@@ -1,0 +1,11 @@
+[package]
+name = "inphic-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "INPHIC 鼠标 HID 字节协议（IN10 / SDKT 平台）"
+
+[dependencies]
+
+[dev-dependencies]
