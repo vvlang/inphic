@@ -19,33 +19,42 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v4
+      # 刻意不使用任何 Action（含 actions/checkout、actions/upload-artartifact）。
+      # 构建只依赖 runner 自带的 Swift / Rust / gh CLI，
+      # 发布走 gh CLI，整个工作流不执行第三方代码。
+      - name: Checkout
+        env:
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${REPO}.git"
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64)" \
+              fetch --depth 1 origin "$REF"
+          git checkout -q FETCH_HEAD
 
       - name: 读取版本
         id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          IS_TAG_PUSH: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
           set -euo pipefail
           FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
-          TAG="${{ github.event.inputs.tag }}"
-          if [ -z "$TAG" ]; then
+          TAG="$INPUT_TAG"
+          if [ "$IS_TAG_PUSH" = "true" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -z "$TAG" ]; then
             TAG="v${FILE_VERSION}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "构建 $TAG（VERSION 文件：$FILE_VERSION）"
 
-      # 仓库在同步盘上时 .build 会带 AppleDouble 文件导致 codesign 失败，
-      # 这里显式把 scratch 放到 runner 本地盘。
-      - name: 缓存 Rust 依赖
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust/**/Cargo.toml') }}
-
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: 环境
+        run: rustup component add clippy rustfmt
 
       - name: Rust 协议层测试
         working-directory: rust
@@ -67,42 +76,62 @@ jobs:
         run: ./Scripts/build-app.sh release
 
       - name: 打包 DMG
-        env:
-          INPHIC_DIST: /tmp/inphic-dist
         run: ./Scripts/make-dmg.sh /tmp/inphic-dist/InphicHub.app
 
-      # 没有 Developer ID 证书时用 ad-hoc 签名。
-      # 用户首次打开需要右键 → 打开，或 `xattr -dr com.apple.quarantine`。
-      - name: 上传构件
-        uses: actions/upload-artifact@v4
-        with:
-          name: InphicHub-${{ steps.ver.outputs.version }}-macOS
-          path: |
-            /tmp/inphic-dist/*.dmg
-            /tmp/inphic-dist/InphicHub.app
-          if-no-files-found: error
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          ls -lh dist/
+          DMG=$(ls dist/*.dmg)
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint /tmp/dmg-verify >/dev/null
+          test -d /tmp/dmg-verify/InphicHub.app
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            /tmp/dmg-verify/InphicHub.app/Contents/Info.plist
+          hdiutil detach /tmp/dmg-verify >/dev/null
 
-      - name: 发布 Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: /tmp/inphic-dist/*.dmg
-          name: Inphic Hub ${{ steps.ver.outputs.version }}
-          body: |
-            ## Inphic Hub ${{ steps.ver.outputs.version }}
+      # ad-hoc 签名，未做 Apple 公证。首次打开需右键 → 打开。
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+          IS_TAG_PUSH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
 
-            英菲克（INPHIC）鼠标的 macOS 设置程序。非官方工具。
+          # 手动触发时先确保 tag 存在，否则 gh release 找不到它
+          if ! git ls-remote --exit-code --tags "https://github.com/${REPO}.git" "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "  · tag $TAG 不存在，创建并指向当前提交"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
 
-            ### 安装
-            1. 下载 `.dmg`
-            2. 拖进「应用程序」
-            3. 首次打开需右键 → 打开（未做公证和开发者签名）
+          NOTES=$(cat <<'TEXT'
+          ## Inphic Hub
 
-            ### 已知限制
-            - 固件不支持读回设置：能读电量，读不回 DPI / 灯光 / 按键
-            - 鼠标进深睡后会丢弃写入，本工具会自动重发唤醒
-            - 蓝牙通道尚未实机验证
+          英菲克（INPHIC）鼠标的 macOS 设置程序。非官方工具。
 
-            协议细节见仓库内 `docs/PROTOCOL.md`。
-          draft: false
-          prerelease: false
+          ### 安装
+          1. 下载 `.dmg`
+          2. 拖进「应用程序」
+          3. 首次打开需**右键 → 打开**（未做 Apple 公证与开发者签名）
+
+          ### 已知限制
+          - 固件不支持读回设置：能读电量，读不回 DPI / 灯光 / 按键
+          - 鼠标进深睡后会丢弃写入，本工具会自动重发唤醒
+          - 蓝牙通道尚未实机验证
+
+          协议细节见仓库内 `docs/PROTOCOL.md`。
+          TEXT
+          )
+
+          if [ "$IS_TAG_PUSH" = "true" ]; then
+            gh release upload "$TAG" dist/*.dmg --clobber
+            gh release edit "$TAG" --title "Inphic Hub $VERSION" --notes "$NOTES"
+            echo "  · 已发布 $TAG"
+          else
+            gh release create "$TAG" dist/*.dmg \
+              --title "Inphic Hub $VERSION (manual)" --notes "$NOTES" --draft
+            echo "  · 草稿已创建：$TAG"
+          fi

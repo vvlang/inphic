@@ -6,15 +6,34 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      # 刻意不使用 actions/checkout —— 用 runner 原生的 git 命令。
+      # 好处是这个工作流不执行任何第三方代码：所有依赖都是 runner 自带的
+      # （Swift / Rust / gh CLI），供应链面最小，也不用信任上游 Action 的 tag。
+      - name: Checkout
+        env:
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${REPO}.git"
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64)" \
+              fetch --depth 1 origin "$REF"
+          git checkout -q FETCH_HEAD
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: 环境
+        run: |
+          swift --version
+          rustc --version
+          rustup component add clippy rustfmt
 
       - name: Rust 协议层
         working-directory: rust
